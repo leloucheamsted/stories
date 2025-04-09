@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:video_player/video_player.dart';
+import 'package:image/image.dart' as img;
 
 List<CameraDescription> cameras = [];
 
@@ -64,7 +65,7 @@ class CameraScreenState extends State<CameraScreen>
   bool _isRecording = false; // Track if video is being recorded
   // Liste pour stocker les images capturées
   List<CapturedImage> _capturedImages = [];
-  
+
   // Max video duration in seconds
   final int _maxVideoDuration = 45;
   // Current video recording duration
@@ -112,7 +113,12 @@ class CameraScreenState extends State<CameraScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _cameraController?.dispose();
+    if (_cameraController != null) {
+      if (_cameraController!.value.isInitialized) {
+        _cameraController!.dispose();
+      }
+      _cameraController = null;
+    }
     _animationController.dispose();
     _videoTimer?.cancel();
     super.dispose();
@@ -168,12 +174,16 @@ class CameraScreenState extends State<CameraScreen>
     try {
       await _cameraController!.initialize();
       await _cameraController!.lockCaptureOrientation();
-      setState(() {
-        _isCameraInitialized = true;
-      });
-      debugPrint('Camera initialized successfully');
+      if (mounted) {  // Vérifier si le widget est toujours monté
+        setState(() {
+          _isCameraInitialized = true;
+        });
+        debugPrint('Camera initialized successfully');
+      }
     } on CameraException catch (e) {
       debugPrint('Error initializing camera: ${e.description}');
+    } catch (e) {
+      debugPrint('Unexpected error initializing camera: $e');
     }
   }
 
@@ -267,20 +277,20 @@ class CameraScreenState extends State<CameraScreen>
         _isRecording = true;
         _currentVideoDuration = 0;
       });
-      
+
       // Start a timer to track recording duration and auto-stop at max duration
       _videoTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
         setState(() {
           _currentVideoDuration++;
         });
-        
+
         // Auto-stop recording when max duration is reached
         if (_currentVideoDuration >= _maxVideoDuration) {
           _stopVideoRecording();
           timer.cancel();
         }
       });
-      
+
       debugPrint('Started video recording');
     } on CameraException catch (e) {
       debugPrint('Error starting video recording: ${e.description}');
@@ -335,7 +345,7 @@ class CameraScreenState extends State<CameraScreen>
       });
     }
   }
-  
+
   void _showVideoPreview(String videoPath) {
     Navigator.push(
       context,
@@ -347,29 +357,25 @@ class CameraScreenState extends State<CameraScreen>
 
   Future<void> _captureImage() async {
     if (_isCaptureInProgress) return;
-    if (!_isCameraInitialized) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Camera is not ready yet')));
-      return;
-    }
-
- // verfiriez le type de grid
-    if (_selectedGridType == GridType.none && _capturedImages.isNotEmpty) {
+    if (!_isCameraInitialized || _cameraController == null || !_cameraController!.value.isInitialized) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Select a grid type before capturing!'),
-        ),
+        const SnackBar(content: Text('Camera is not ready yet')),
       );
       return;
     }
-    // Vérifier si la limite d'images a été atteinte
 
+    // Vérifiez le type de grid
+    if (_selectedGridType == GridType.none && _capturedImages.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select a grid type before capturing!')),
+      );
+      return;
+    }
+    
+    // Vérifier si la limite d'images a été atteinte
     if (_capturedImages.length >= _maxStoryPhotos) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Maximum number of story photos reached!'),
-        ),
+        const SnackBar(content: Text('Maximum number of story photos reached!')),
       );
       return;
     }
@@ -385,11 +391,40 @@ class CameraScreenState extends State<CameraScreen>
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
 
-      // Capturer l'image
-      final xFile = await _cameraController!.takePicture();
+      // Capture sécurisée: vérifier que la caméra est toujours disponible
+      CameraController? controller = _cameraController;
+      if (controller == null || !controller.value.isInitialized) {
+        setState(() {
+          _isCaptureInProgress = false;
+        });
+        return;
+      }
+      
+      // Capturer l'image avec le controller actuel
+      final xFile = await controller.takePicture();
+      // Vérifier que le fichier existe avant de le copier
+      if (xFile.path.isEmpty || !await File(xFile.path).exists()) {
+        debugPrint('Camera returned empty or invalid file path: ${xFile.path}');
+        setState(() {
+          _isCaptureInProgress = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to capture image: invalid file')),
+          );
+        }
+        return;
+      }
+      
+      // Créer le chemin de destination
       final imagePath = path.join(directory.path, 'story_$timestamp.jpg');
       await File(xFile.path).copy(imagePath);
 
+      // Vérifier que nous sommes toujours montés avant de mettre à jour l'état
+      if (!mounted) {
+        return;
+      }
+      
       // Ajouter l'image capturée à la liste
       setState(() {
         _capturedImages.add(
@@ -397,13 +432,10 @@ class CameraScreenState extends State<CameraScreen>
         );
         _isCaptureInProgress = false;
 
-        // Si c'est la première photo et que nous avons une seconde à prendre,
-        // basculer automatiquement sur le style de grille opposé pour la deuxième photo
+        // Si c'est la première photo et que nous avons une seconde à prendre
         if (_capturedImages.length == 1 && _maxStoryPhotos > 1) {
-          _selectedGridType =
-              _selectedGridType == GridType.horizontal
-                  ? GridType.vertical
-                  : _selectedGridType == GridType.vertical ? GridType.horizontal : GridType.bottomRight;
+          // Garder le même type de grille pour toutes les photos
+          // Cela évite les problèmes de changement de configuration au milieu de la capture
         }
       });
 
@@ -443,7 +475,8 @@ class CameraScreenState extends State<CameraScreen>
     // Si nous n'avons pas encore d'images
     if (_capturedImages.isEmpty) {
       // En mode bottomRight ou none, afficher simplement la caméra en plein écran
-      if (_selectedGridType == GridType.none || _selectedGridType == GridType.bottomRight) {
+      if (_selectedGridType == GridType.none ||
+          _selectedGridType == GridType.bottomRight) {
         return _buildCameraPreview();
       }
     }
@@ -466,7 +499,8 @@ class CameraScreenState extends State<CameraScreen>
     }
 
     // Si une image a été prise en mode bottomRight, afficher l'image avec mini caméra
-    if (_capturedImages.isNotEmpty && capturedGridType == GridType.bottomRight) {
+    if (_capturedImages.isNotEmpty &&
+        capturedGridType == GridType.bottomRight) {
       return Stack(
         children: [
           // Image en plein écran
@@ -476,7 +510,7 @@ class CameraScreenState extends State<CameraScreen>
             width: double.infinity,
             height: double.infinity,
           ),
-          
+
           // Mini caméra en bas à droite
           Positioned(
             bottom: 150,
@@ -489,19 +523,21 @@ class CameraScreenState extends State<CameraScreen>
                 border: Border.all(color: Colors.white, width: 2),
               ),
               child: ClipOval(
-                child: Image.file(
-                  File(bottomOrRightImagePath!),
-                  fit: BoxFit.cover,
-                  width: 200,
-                  height: 200,
-                ),
+                child:
+                  bottomOrRightImagePath != null
+                    ? Image.file(
+                      File(bottomOrRightImagePath),
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                    )
+                    : _buildCameraPreview(),
               ),
             ),
           ),
         ],
       );
     }
-    
+
     // Si une image a été prise en mode plein écran, l'afficher simplement
     if (_capturedImages.isNotEmpty && capturedGridType == GridType.none) {
       return Image.file(
@@ -519,7 +555,7 @@ class CameraScreenState extends State<CameraScreen>
             ? _selectedGridType == GridType.horizontal
             : capturedGridType == GridType.horizontal;
 
-    if (isHorizontalGrid) {
+    if (!isHorizontalGrid) {
       // Grille horizontale (division haut/bas)
       return Column(
         children: [
@@ -559,7 +595,7 @@ class CameraScreenState extends State<CameraScreen>
           ),
         ],
       );
-    } else  {
+    } else {
       // Grille verticale (division gauche/droite)
       return Row(
         children: [
@@ -599,7 +635,6 @@ class CameraScreenState extends State<CameraScreen>
         ],
       );
     }
-  
   }
 
   // Widget pour l'aperçu de la caméra
@@ -635,8 +670,130 @@ class CameraScreenState extends State<CameraScreen>
     );
   }
 
+  // Fonction pour fusionner les images en une seule selon l'orientation
+  Future<File?> _mergeImages() async {
+    if (_capturedImages.length < 2) return null;
+
+    try {
+      // Decode les deux images
+      final image1 = img.decodeImage(
+        await File(_capturedImages[0].path).readAsBytes(),
+      );
+      final image2 = img.decodeImage(
+        await File(_capturedImages[1].path).readAsBytes(),
+      );
+
+      if (image1 == null || image2 == null) return null;
+
+      late img.Image merged;
+
+      // Créer une image fusionnée selon le type de grille
+      if (_capturedImages[0].gridType == GridType.horizontal) {
+        // Fusionner horizontalement (une image au-dessus de l'autre)
+        merged = img.Image(
+          width: image1.width + image2.width,
+          height: image1.height,
+        );
+        img.compositeImage(merged, image1, dstX: 0, dstY: 0);
+        img.compositeImage(merged, image2, dstX: image1.width, dstY: 0);
+      } else if (_capturedImages[0].gridType == GridType.vertical) {
+        // Fusionner verticalement (une image à côté de l'autre)
+        merged = img.Image(
+          width: image1.width,
+          height: image1.height + image2.height,
+        );
+        img.compositeImage(merged, image1, dstX: 0, dstY: 0);
+        img.compositeImage(merged, image2, dstX: 0, dstY: image1.height);
+      } else if (_capturedImages[0].gridType == GridType.bottomRight) {
+        // Dessiner directement sur l'image principale sans utiliser d'intermédiaire
+        
+        // Copier l'image de fond
+        merged = img.copyResize(
+          image1,
+          width: image1.width,
+          height: image1.height,
+        );
+        
+        // Redimensionner la seconde image pour l'insérer en cercle - taille doublée
+        final circleSize = image1.width ~/ 3 * 2; // Doublé la taille du cercle
+        final resizedImage2 = img.copyResize(
+          image2,
+          width: circleSize,
+          height: circleSize,
+        );
+        
+        // Position du cercle en bas à droite
+        final posX = merged.width - circleSize - 20;
+        final posY = merged.height - circleSize - 20;
+        
+        // Rayon du cercle
+        final radius = circleSize / 2;
+        
+        // Centre du cercle relatif à la position
+        final centerX = radius;
+        final centerY = radius;
+        
+        // Dessiner directement sur l'image fusionnée en appliquant un masque circulaire
+        for (int y = 0; y < circleSize; y++) {
+          for (int x = 0; x < circleSize; x++) {
+            // Position absolue dans l'image fusionnée
+            final absX = posX + x;
+            final absY = posY + y;
+            
+            // Vérifier si le pixel est dans les limites
+            if (absX >= 0 && absX < merged.width && absY >= 0 && absY < merged.height) {
+              // Distance au centre du cercle
+              final dx = x - centerX;
+              final dy = y - centerY;
+              final distance = math.sqrt(dx * dx + dy * dy);
+              
+              // Dessiner bordure blanche
+              if (distance <= radius && distance >= radius - 2) {
+                // Bordure blanche
+                merged.setPixel(absX, absY, img.ColorRgba8(255, 255, 255, 255));
+              } 
+              // Dessiner l'intérieur du cercle
+              else if (distance < radius - 2) {
+                // Copier le pixel de la seconde image
+                merged.setPixel(absX, absY, resizedImage2.getPixel(x, y));
+              }
+              // Ne rien faire pour les pixels en dehors du cercle (garder l'image de fond)
+            }
+          }
+        }
+      } else {
+        // Si GridType.none, simplement retourner la première image
+        final directory = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final outputPath = "${directory.path}/final_${timestamp}.jpg";
+        await File(_capturedImages[0].path).copy(outputPath);
+        return File(outputPath);
+      }
+
+      // Sauvegarder l'image fusionnée - utiliser PNG pour préserver la transparence si nécessaire
+      final Directory tempDir = await getTemporaryDirectory();
+      final bool hasBorderCircle = _capturedImages[0].gridType == GridType.bottomRight;
+      
+      // Sauvegarder en PNG si on a un cercle (pour la transparence), sinon JPG
+      if (hasBorderCircle) {
+        final outputPath = "${tempDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.png";
+        final file = File(outputPath);
+        await file.writeAsBytes(img.encodePng(merged));
+        return file;
+      } else {
+        final outputPath = "${tempDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.jpg";
+        final file = File(outputPath);
+        await file.writeAsBytes(img.encodeJpg(merged));
+        return file;
+      }
+    } catch (e) {
+      debugPrint('Error merging images: $e');
+      return null;
+    }
+  }
+
   // Fonction pour prévisualiser la story complète
-  void _previewStory() {
+  Future<void> _previewStory() async {
     if (_capturedImages.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Take at least one photo first!')),
@@ -644,13 +801,49 @@ class CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder:
-            (context) => StoryPreviewScreen(capturedImages: _capturedImages),
-      ),
-    );
+    // Si nous avons plusieurs images et que le type de grille n'est pas none,
+    // fusionner les images en une seule
+    if (_capturedImages.length >= 2 &&
+        _capturedImages[0].gridType != GridType.none) {
+      final mergedFile = await _mergeImages();
+
+      if (mergedFile != null) {
+        // Créer une nouvelle liste avec l'image fusionnée
+        final mergedImage = CapturedImage(
+          path: mergedFile.path,
+          gridType: GridType.none,
+        );
+
+        // Afficher l'image fusionnée
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ImagePreviewScreen(image: mergedImage),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Failed to merge images')));
+      }
+    } else if (_capturedImages.length == 1) {
+      // Pour une seule image, l'afficher directement
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => ImagePreviewScreen(image: _capturedImages[0]),
+        ),
+      );
+    } else {
+      // Comportement classique pour GridType.none avec plusieurs images
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder:
+              (context) => StoryPreviewScreen(capturedImages: _capturedImages),
+        ),
+      );
+    }
   }
 
   @override
@@ -679,7 +872,7 @@ class CameraScreenState extends State<CameraScreen>
                           if (_capturedImages.isNotEmpty) {
                             setState(() {
                               _capturedImages.clear();
-                              _selectedGridType = GridType.horizontal;
+                              _selectedGridType = GridType.none;
                             });
                           } else {
                             Navigator.pop(context);
@@ -799,28 +992,41 @@ class CameraScreenState extends State<CameraScreen>
                     ),
                     child: GestureDetector(
                       // switch video or camera mode
-                      
                       onTap: () async {
                         // If recording in progress, stop first
-                         setState(() {
-                            _selectedGridType = GridType.none;
-                          });
-                        if (_isVideoMode &&
-                            _cameraController?.value.isRecordingVideo == true) {
+                        setState(() {
+                          _selectedGridType = GridType.none;
+                        });
+                        
+                        bool wasRecording = false;
+                        if (_isVideoMode && _cameraController?.value.isRecordingVideo == true) {
+                          wasRecording = true;
                           await _stopVideoRecording();
-                         
                         }
 
+                        // First toggle the mode flag before disposing the camera
+                        final bool newIsVideoMode = !_isVideoMode;
                         setState(() {
-                          _isVideoMode = !_isVideoMode; // Toggle the mode
+                          _isVideoMode = newIsVideoMode;
+                          _isCameraInitialized = false; // Mark as not initialized
                         });
 
-                        // Need to reinitialize camera to change audio settings
-                        await _cameraController?.dispose();
-                        _cameraController = null;
-                        setState(() {
-                          _isCameraInitialized = false;
-                        });
+                        // Safely dispose old controller
+                        if (_cameraController != null) {
+                          final oldController = _cameraController;
+                          _cameraController = null; // Remove reference before disposing
+                          
+                          try {
+                            await oldController!.dispose();
+                          } catch (e) {
+                            debugPrint('Error disposing camera controller: $e');
+                          }
+                        }
+                        
+                        // Wait a moment before initializing new camera
+                        await Future.delayed(Duration(milliseconds: 300));
+                        
+                        // Now initialize with new settings
                         await _initializeCamera();
 
                         if (_isVideoMode) {
@@ -910,7 +1116,7 @@ class CameraScreenState extends State<CameraScreen>
                         children: [
                           GestureDetector(
                             onTap: () {
-                              if(_selectedGridType== GridType.horizontal){
+                              if (_selectedGridType == GridType.horizontal) {
                                 _cycleGridType(GridType.none);
                                 return;
                               }
@@ -941,7 +1147,7 @@ class CameraScreenState extends State<CameraScreen>
                           const SizedBox(height: 8),
                           GestureDetector(
                             onTap: () {
-                              if(_selectedGridType== GridType.vertical){
+                              if (_selectedGridType == GridType.vertical) {
                                 _cycleGridType(GridType.none);
                                 return;
                               }
@@ -971,7 +1177,7 @@ class CameraScreenState extends State<CameraScreen>
                           const SizedBox(height: 8),
                           GestureDetector(
                             onTap: () {
-                              if(_selectedGridType== GridType.bottomRight){
+                              if (_selectedGridType == GridType.bottomRight) {
                                 _cycleGridType(GridType.none);
                                 return;
                               }
@@ -1014,7 +1220,10 @@ class CameraScreenState extends State<CameraScreen>
             child: Column(
               children: [
                 // Mode sélection
-               (_selectedGridType !=GridType.none && _capturedImages.length < _maxStoryPhotos) || (_selectedGridType == GridType.none && _capturedImages.isEmpty)
+                (_selectedGridType != GridType.none &&
+                            _capturedImages.length < _maxStoryPhotos) ||
+                        (_selectedGridType == GridType.none &&
+                            _capturedImages.isEmpty)
                     ? SizedBox(
                       height: 100,
                       child: PageView.builder(
@@ -1064,21 +1273,20 @@ class CameraScreenState extends State<CameraScreen>
                                         : [],
                               ),
                               child: GestureDetector(
-                                onTap:
-                                 () {
-                                          if (_isVideoMode) {
-                                            if (_cameraController
-                                                    ?.value
-                                                    .isRecordingVideo ==
-                                                true) {
-                                              _stopVideoRecording();
-                                            } else {
-                                              _startVideoRecording();
-                                            }
-                                          } else {
-                                            _captureImage();
-                                          }
-                                        },
+                                onTap: () {
+                                  if (_isVideoMode) {
+                                    if (_cameraController
+                                            ?.value
+                                            .isRecordingVideo ==
+                                        true) {
+                                      _stopVideoRecording();
+                                    } else {
+                                      _startVideoRecording();
+                                    }
+                                  } else {
+                                    _captureImage();
+                                  }
+                                },
                                 child:
                                     _isVideoMode &&
                                             _cameraController
@@ -1088,17 +1296,22 @@ class CameraScreenState extends State<CameraScreen>
                                         ? Stack(
                                           alignment: Alignment.center,
                                           children: [
-                                            // Progress indicator 
-                                          index ==0 ?  SizedBox(
-                                              width: 70,
-                                              height: 70,
-                                              child: CustomPaint(
-                                                painter: CircularProgressPainter(
-                                                  progress: _currentVideoDuration / _maxVideoDuration,
-                                                  color: Colors.red,
-                                                ),
-                                              ),
-                                            ):SizedBox.shrink(),
+                                            // Progress indicator
+                                            index == 0
+                                                ? SizedBox(
+                                                  width: 70,
+                                                  height: 70,
+                                                  child: CustomPaint(
+                                                    painter:
+                                                        CircularProgressPainter(
+                                                          progress:
+                                                              _currentVideoDuration /
+                                                              _maxVideoDuration,
+                                                          color: Colors.red,
+                                                        ),
+                                                  ),
+                                                )
+                                                : SizedBox.shrink(),
                                             // Inner record button
                                             Container(
                                               width: 50,
@@ -1114,15 +1327,21 @@ class CameraScreenState extends State<CameraScreen>
                                           alignment: Alignment.center,
                                           children: [
                                             // Show progress indicator for photo capture
-                                            if (!_isVideoMode && _capturedImages.isNotEmpty && index ==0)
+                                            if (!_isVideoMode &&
+                                                _capturedImages.isNotEmpty &&
+                                                index == 0)
                                               SizedBox(
                                                 width: 70,
                                                 height: 70,
                                                 child: CustomPaint(
-                                                  painter: CircularProgressPainter(
-                                                    progress: _capturedImages.length / _maxStoryPhotos,
-                                                    color: Colors.black,
-                                                  ),
+                                                  painter:
+                                                      CircularProgressPainter(
+                                                        progress:
+                                                            _capturedImages
+                                                                .length /
+                                                            _maxStoryPhotos,
+                                                        color: Colors.black,
+                                                      ),
                                                 ),
                                               ),
                                             // Icon
@@ -1133,7 +1352,9 @@ class CameraScreenState extends State<CameraScreen>
                                               colorFilter:
                                                   _isVideoMode
                                                       ? ColorFilter.mode(
-                                                        Colors.red.withOpacity(0.8),
+                                                        Colors.red.withOpacity(
+                                                          0.8,
+                                                        ),
                                                         BlendMode.srcIn,
                                                       )
                                                       : null,
@@ -1495,10 +1716,10 @@ class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
     _videoPlayerController = VideoPlayerController.file(File(widget.videoPath));
     await _videoPlayerController.initialize();
     await _videoPlayerController.setLooping(true);
-    
+
     // Auto-play when initialized
     await _videoPlayerController.play();
-    
+
     setState(() {
       _isPlaying = true;
     });
@@ -1518,14 +1739,15 @@ class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
         children: [
           // Video
           Center(
-            child: _videoPlayerController.value.isInitialized
-                ? AspectRatio(
-                    aspectRatio: _videoPlayerController.value.aspectRatio,
-                    child: VideoPlayer(_videoPlayerController),
-                  )
-                : const CircularProgressIndicator(),
+            child:
+                _videoPlayerController.value.isInitialized
+                    ? AspectRatio(
+                      aspectRatio: _videoPlayerController.value.aspectRatio,
+                      child: VideoPlayer(_videoPlayerController),
+                    )
+                    : const CircularProgressIndicator(),
           ),
-          
+
           // Controls
           Positioned(
             bottom: 20,
@@ -1539,13 +1761,13 @@ class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
                   icon: const Icon(Icons.close, color: Colors.white, size: 30),
                   onPressed: () => Navigator.pop(context),
                 ),
-                
+
                 // Play/Pause button
                 IconButton(
                   icon: Icon(
-                    _isPlaying ? Icons.pause : Icons.play_arrow, 
-                    color: Colors.white, 
-                    size: 40
+                    _isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
+                    size: 40,
                   ),
                   onPressed: () {
                     setState(() {
@@ -1558,7 +1780,7 @@ class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
                     });
                   },
                 ),
-                
+
                 // Share button
                 IconButton(
                   icon: const Icon(Icons.share, color: Colors.white, size: 30),
@@ -1571,23 +1793,24 @@ class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
               ],
             ),
           ),
-          
+
           // Video progress
           Positioned(
             bottom: 80,
             left: 20,
             right: 20,
-            child: _videoPlayerController.value.isInitialized
-                ? VideoProgressIndicator(
-                    _videoPlayerController,
-                    allowScrubbing: true,
-                    colors: const VideoProgressColors(
-                      playedColor: Colors.red,
-                      bufferedColor: Colors.grey,
-                      backgroundColor: Colors.white,
-                    ),
-                  )
-                : const SizedBox(),
+            child:
+                _videoPlayerController.value.isInitialized
+                    ? VideoProgressIndicator(
+                      _videoPlayerController,
+                      allowScrubbing: true,
+                      colors: const VideoProgressColors(
+                        playedColor: Colors.red,
+                        bufferedColor: Colors.grey,
+                        backgroundColor: Colors.white,
+                      ),
+                    )
+                    : const SizedBox(),
           ),
         ],
       ),
@@ -1665,5 +1888,42 @@ class SplitImageView extends StatelessWidget {
         ],
       );
     }
+  }
+}
+
+// Créer un nouveau widget pour afficher l'image fusionnée
+class ImagePreviewScreen extends StatefulWidget {
+  final CapturedImage image;
+
+  const ImagePreviewScreen({super.key, required this.image});
+
+  @override
+  _ImagePreviewScreenState createState() => _ImagePreviewScreenState();
+}
+
+class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
+  late String imagePath;
+
+  @override
+  void initState() {
+    super.initState();
+    imagePath = widget.image.path;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          Image.file(
+            File(imagePath),
+            fit: BoxFit.contain,
+            width: double.infinity,
+            height: double.infinity,
+          ),
+        ],
+      ),
+    );
   }
 }
