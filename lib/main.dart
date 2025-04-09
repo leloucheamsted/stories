@@ -1,0 +1,1411 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
+import 'package:flutter_svg/flutter_svg.dart';
+
+List<CameraDescription> cameras = [];
+
+Future<void> main() async {
+  // Ensure Flutter is initialized
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    // Get available cameras
+    cameras = await availableCameras();
+  } on CameraException catch (e) {
+    debugPrint('Error initializing cameras: ${e.description}');
+  }
+
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Camera Stories',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
+      ),
+      home: const CameraScreen(),
+    );
+  }
+}
+
+// Enumération pour les types de grilles
+enum GridType {
+  none, // Pas de grille, photo plein écran
+  horizontal, // Séparation horizontale (deux rangées)
+  vertical, // Séparation verticale (deux colonnes)
+}
+
+class CameraScreen extends StatefulWidget {
+  const CameraScreen({super.key});
+
+  @override
+  CameraScreenState createState() => CameraScreenState();
+}
+
+class CameraScreenState extends State<CameraScreen>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
+  CameraController? _cameraController;
+  bool _isCameraInitialized = false;
+  bool _isCaptureInProgress = false;
+  bool _isVideoMode = false; // Default to camera mode
+  bool _isRecording = false; // Track if video is being recorded
+  // Liste pour stocker les images capturées
+  List<CapturedImage> _capturedImages = [];
+
+  // Contrôleur d'animation pour le bouton de capture
+  late AnimationController _animationController;
+
+  // Type de grille sélectionné
+  GridType _selectedGridType = GridType.horizontal;
+
+  // Nombre de photos dans notre histoire (exactement 2)
+  final int _maxStoryPhotos = 2;
+  final PageController _pageController = PageController(viewportFraction: 0.3);
+  int selectedIndex = 0;
+
+  final List<String> icons = [
+    'assets/story.svg',
+    'assets/short.svg',
+    'assets/challenge.svg',
+  ];
+  int _currentCameraIndex = 0; // Default to the first camera
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeCamera();
+    _pageController.addListener(() {
+      setState(() {});
+    });
+    // Initialiser le contrôleur d'animation
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+  }
+
+  double _calculateScale(int index) {
+    double page = _pageController.page ?? selectedIndex.toDouble();
+    double distance = (index - page).abs();
+    return 1.3 - (distance * 0.3).clamp(0.5, 1.3);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cameraController?.dispose();
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // App state changed before the camera was initialized
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive) {
+      _cameraController?.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
+  }
+
+  Future<void> _initializeCamera() async {
+    if (cameras.isEmpty) {
+      debugPrint('No cameras available');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No cameras found on device')),
+      );
+      return;
+    }
+
+    debugPrint('Available cameras: ${cameras.length}');
+    for (var camera in cameras) {
+      debugPrint('Camera: ${camera.name}, direction: ${camera.lensDirection}');
+    }
+
+    // Utiliser par défaut la caméra arrière
+    CameraDescription? mainCamera;
+    for (final camera in cameras) {
+      if (camera.lensDirection == CameraLensDirection.back) {
+        mainCamera = camera;
+        break;
+      }
+    }
+
+    // Si pas de caméra arrière, prendre la première disponible
+    mainCamera ??= cameras.first;
+
+    _cameraController = CameraController(
+      mainCamera,
+      ResolutionPreset.medium,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+      enableAudio: _isVideoMode, // Enable audio only for video mode
+    );
+
+    try {
+      await _cameraController!.initialize();
+      await _cameraController!.lockCaptureOrientation();
+      setState(() {
+        _isCameraInitialized = true;
+      });
+      debugPrint('Camera initialized successfully');
+    } on CameraException catch (e) {
+      debugPrint('Error initializing camera: ${e.description}');
+    }
+  }
+
+  Future<void> _switchCamera() async {
+    if (cameras.isEmpty) return;
+
+    // If recording video, stop it first
+    if (_isVideoMode && _cameraController?.value.isRecordingVideo == true) {
+      await _stopVideoRecording();
+    }
+
+    // Dispose of the current controller before changing state
+    final CameraController? oldController = _cameraController;
+    _cameraController = null;
+
+    // Update state to show loading indicator
+    setState(() {
+      _isCameraInitialized = false;
+      _isRecording = false;
+      // Toggle the camera index
+      _currentCameraIndex = (_currentCameraIndex + 1) % cameras.length;
+    });
+
+    // Dispose of the old controller
+    await oldController?.dispose();
+
+    // Initialize the new camera
+    _cameraController = CameraController(
+      cameras[_currentCameraIndex],
+      ResolutionPreset.medium,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+      enableAudio: _isVideoMode, // Enable audio only in video mode
+    );
+
+    try {
+      await _cameraController!.initialize();
+      await _cameraController!.lockCaptureOrientation();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      }
+    } on CameraException catch (e) {
+      debugPrint('Error switching camera: ${e.description}');
+    }
+  }
+
+  // Fonction pour faire défiler les types de grilles (y compris le mode sans grille)
+  void _cycleGridType(GridType gridType) {
+    // En mode vidéo, désactiver les grilles
+    if (_isVideoMode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Grid options are only available in photo mode'),
+        ),
+      );
+      return;
+    }
+
+    // Ne pas changer de type de grille si des photos ont déjà été prises
+    if (_capturedImages.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot change grid type after taking photos'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _selectedGridType = gridType;
+    });
+  }
+
+  Future<void> _startVideoRecording() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Camera is not ready yet')));
+      return;
+    }
+
+    if (_cameraController!.value.isRecordingVideo) {
+      return;
+    }
+
+    try {
+      await _cameraController!.startVideoRecording();
+      setState(() {
+        _isCaptureInProgress = true;
+        _isRecording = true;
+      });
+      debugPrint('Started video recording');
+    } on CameraException catch (e) {
+      debugPrint('Error starting video recording: ${e.description}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to start recording: ${e.description}')),
+      );
+      setState(() {
+        _isCaptureInProgress = false;
+        _isRecording = false;
+      });
+    }
+  }
+
+  Future<void> _stopVideoRecording() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return;
+    }
+
+    if (!_cameraController!.value.isRecordingVideo) {
+      return;
+    }
+
+    try {
+      final XFile video = await _cameraController!.stopVideoRecording();
+      setState(() {
+        _isCaptureInProgress = false;
+        _isRecording = false;
+      });
+
+      // Copy the video to a more permanent location
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final videoPath = path.join(directory.path, 'video_$timestamp.mp4');
+      await File(video.path).copy(videoPath);
+
+      debugPrint('Video recorded to: $videoPath');
+
+      // Show confirmation
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Video recorded successfully!')),
+      );
+    } on CameraException catch (e) {
+      debugPrint('Error stopping video recording: ${e.description}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to stop recording: ${e.description}')),
+      );
+      setState(() {
+        _isCaptureInProgress = false;
+        _isRecording = false;
+      });
+    }
+  }
+
+  Future<void> _captureImage() async {
+    if (_isCaptureInProgress) return;
+    if (!_isCameraInitialized) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Camera is not ready yet')));
+      return;
+    }
+
+    // Vérifier si la limite d'images a été atteinte
+    if (_capturedImages.length >= _maxStoryPhotos) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Maximum number of story photos reached!'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isCaptureInProgress = true;
+    });
+
+    // Animer le bouton de capture
+    _animationController.forward(from: 0.0);
+
+    try {
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+
+      // Capturer l'image
+      final xFile = await _cameraController!.takePicture();
+      final imagePath = path.join(directory.path, 'story_$timestamp.jpg');
+      await File(xFile.path).copy(imagePath);
+
+      // Ajouter l'image capturée à la liste
+      setState(() {
+        _capturedImages.add(
+          CapturedImage(path: imagePath, gridType: _selectedGridType),
+        );
+        _isCaptureInProgress = false;
+
+        // Si c'est la première photo et que nous avons une seconde à prendre,
+        // basculer automatiquement sur le style de grille opposé pour la deuxième photo
+        if (_capturedImages.length == 1 && _maxStoryPhotos > 1) {
+          _selectedGridType =
+              _selectedGridType == GridType.horizontal
+                  ? GridType.vertical
+                  : GridType.horizontal;
+        }
+      });
+
+      // Si on a pris toutes les photos nécessaires, proposer d'afficher la prévisualisation
+      if (_capturedImages.length == _maxStoryPhotos) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('All photos captured! Review your story?'),
+            action: SnackBarAction(label: 'Preview', onPressed: _previewStory),
+          ),
+        );
+      }
+      // Si c'est la première capture, afficher un message pour informer l'utilisateur
+      else if (_capturedImages.length == 1) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'First photo captured! Take one more for your story.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error capturing image: $e');
+      setState(() {
+        _isCaptureInProgress = false;
+      });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to capture image: $e')));
+    }
+  }
+
+  // Construit la vue divisée avec caméra uniquement dans les zones vides
+  Widget _buildSplitCameraView() {
+    // Si nous n'avons pas encore d'images et que le mode sans grille est sélectionné,
+    // afficher simplement la caméra en plein écran
+    if (_capturedImages.isEmpty && _selectedGridType == GridType.none) {
+      return _buildCameraPreview();
+    }
+
+    // Trouver si des images existent pour les emplacements spécifiques
+    String? topOrLeftImagePath;
+    String? bottomOrRightImagePath;
+    GridType? capturedGridType;
+
+    // Parcourir les images capturées pour placer chacune au bon endroit
+    for (int i = 0; i < _capturedImages.length; i++) {
+      final image = _capturedImages[i];
+      capturedGridType = image.gridType;
+
+      if (i == 0) {
+        topOrLeftImagePath = image.path;
+      } else if (i == 1) {
+        bottomOrRightImagePath = image.path;
+      }
+    }
+
+    // Si une image a été prise en mode plein écran, l'afficher simplement
+    if (_capturedImages.isNotEmpty && capturedGridType == GridType.none) {
+      return Image.file(
+        File(topOrLeftImagePath!),
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+      );
+    }
+
+    // Vérifier dans quelle disposition les placer
+    // Si nous avons des images, nous utilisons leur type de grille, sinon la sélection actuelle
+    final bool isHorizontalGrid =
+        _capturedImages.isEmpty
+            ? _selectedGridType == GridType.horizontal
+            : capturedGridType == GridType.horizontal;
+
+    if (isHorizontalGrid) {
+      // Grille horizontale (division haut/bas)
+      return Column(
+        children: [
+          // Moitié supérieure
+          Expanded(
+            child: Stack(
+              children: [
+                topOrLeftImagePath != null
+                    ? Image.file(
+                      File(topOrLeftImagePath),
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                    )
+                    : _buildCameraPreview(),
+              ],
+            ),
+          ),
+
+          // Ligne de séparation
+          Container(height: 1, color: Colors.white.withOpacity(0.7)),
+
+          // Moitié inférieure
+          Expanded(
+            child: Stack(
+              children: [
+                bottomOrRightImagePath != null
+                    ? Image.file(
+                      File(bottomOrRightImagePath),
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                    )
+                    : _buildCameraPreview(),
+                if (bottomOrRightImagePath == null && _capturedImages.isEmpty)
+                  Container(color: Colors.black.withOpacity(0.8)),
+              ],
+            ),
+          ),
+        ],
+      );
+    } else {
+      // Grille verticale (division gauche/droite)
+      return Row(
+        children: [
+          // Moitié gauche
+          Expanded(
+            child:
+                topOrLeftImagePath != null
+                    ? Image.file(
+                      File(topOrLeftImagePath),
+                      fit: BoxFit.cover,
+                      height: double.infinity,
+                    )
+                    : _buildCameraPreview(), // Caméra seulement si aucune image n'est prise
+          ),
+
+          // Ligne de séparation
+          Container(width: 1, color: Colors.white.withOpacity(0.7)),
+
+          // Moitié droite
+          Expanded(
+            child: Stack(
+              children: [
+                bottomOrRightImagePath != null
+                    ? Image.file(
+                      File(bottomOrRightImagePath),
+                      fit: BoxFit.cover,
+                      height: double.infinity,
+                    )
+                    : _buildCameraPreview(),
+                if (bottomOrRightImagePath == null && _capturedImages.isEmpty)
+                  Container(color: Colors.black.withOpacity(0.8)),
+                // Caméra seulement si aucune image n'est prise
+              ],
+            ),
+            // Caméra seulement si aucune image n'est prise
+          ),
+        ],
+      );
+    }
+  }
+
+  // Widget pour l'aperçu de la caméra
+  Widget _buildCameraPreview() {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
+    }
+
+    // Safely access previewSize with null check
+    final previewSize = _cameraController!.value.previewSize;
+    if (previewSize == null) {
+      return const Center(
+        child: Text(
+          'Camera preview size unavailable',
+          style: TextStyle(color: Colors.white),
+        ),
+      );
+    }
+
+    return ClipRect(
+      child: SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: previewSize.height,
+            height: previewSize.width,
+            child: CameraPreview(_cameraController!),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Fonction pour prévisualiser la story complète
+  void _previewStory() {
+    if (_capturedImages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Take at least one photo first!')),
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (context) => StoryPreviewScreen(capturedImages: _capturedImages),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // Section d'aperçu de la caméra avec les grilles remplies
+          _buildSplitCameraView(),
+
+          // Barre supérieure avec boutons
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      // Bouton retour
+                      GestureDetector(
+                        onTap: () {
+                          if (_capturedImages.isNotEmpty) {
+                            setState(() {
+                              _capturedImages.clear();
+                              _selectedGridType = GridType.horizontal;
+                            });
+                          } else {
+                            Navigator.pop(context);
+                          }
+                        },
+
+                        child: SvgPicture.asset(
+                          _capturedImages.isNotEmpty
+                              ? 'assets/close.svg'
+                              : 'assets/back.svg',
+                          width: 18,
+                          height: 18,
+                          colorFilter: const ColorFilter.mode(
+                            Colors.white,
+                            BlendMode.srcIn,
+                          ),
+                        ),
+                      ),
+
+                      // Ajouter une musique
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Row(
+                          children: [
+                            SvgPicture.asset(
+                              'assets/music.svg',
+                              width: 20,
+                              height: 20,
+                              colorFilter: const ColorFilter.mode(
+                                Colors.white,
+                                BlendMode.srcIn,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Ajouter une musique',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // Bouton paramètres
+                      SvgPicture.asset(
+                        'assets/settings.svg',
+                        width: 24,
+                        height: 24,
+                        colorFilter: const ColorFilter.mode(
+                          Colors.white,
+                          BlendMode.srcIn,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // Reste de la colonne pour ajouter d'autres éléments si nécessaire
+                  const Spacer(),
+                ],
+              ),
+            ),
+          ),
+
+          // Boutons latéraux gauche
+          Positioned(
+            left: 16,
+            top: MediaQuery.of(context).size.height * 0.25,
+            child: Column(
+              children: [
+                // Bouton texte - visible uniquement quand capture terminée
+                if (_capturedImages.length >= _maxStoryPhotos)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 20),
+                    child: GestureDetector(
+                      onTap: () {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Ajout de texte')),
+                        );
+                      },
+                      child: SvgPicture.asset(
+                        'assets/text.svg',
+                        width: 28,
+                        height: 28,
+                        colorFilter: const ColorFilter.mode(
+                          Colors.white,
+                          BlendMode.srcIn,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Bouton toggle photo/video - visible seulement avant capture
+                if (_capturedImages.isEmpty &&
+                    _capturedImages.length < _maxStoryPhotos)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 20),
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color:
+                          _isVideoMode
+                              ? Colors.red.withOpacity(0.3)
+                              : Colors.transparent,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: _isVideoMode ? Colors.red : Colors.transparent,
+                        width: 2,
+                      ),
+                    ),
+                    child: GestureDetector(
+                      // switch video or camera mode
+                      onTap: () async {
+                        // If recording in progress, stop first
+                        if (_isVideoMode &&
+                            _cameraController?.value.isRecordingVideo == true) {
+                          await _stopVideoRecording();
+                        }
+
+                        setState(() {
+                          _isVideoMode = !_isVideoMode; // Toggle the mode
+                        });
+
+                        // Need to reinitialize camera to change audio settings
+                        await _cameraController?.dispose();
+                        _cameraController = null;
+                        setState(() {
+                          _isCameraInitialized = false;
+                        });
+                        await _initializeCamera();
+
+                        if (_isVideoMode) {
+                          debugPrint('Switched to video mode');
+                        } else {
+                          debugPrint('Switched to photo mode');
+                        }
+                      },
+                      child: SvgPicture.asset(
+                        _isVideoMode ? 'assets/video.svg' : 'assets/camera.svg',
+                        width: 28,
+                        height: 28,
+                        colorFilter: ColorFilter.mode(
+                          _isVideoMode ? Colors.red : Colors.white,
+                          BlendMode.srcIn,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Bouton sticker - visible uniquement quand capture terminée
+                if (_capturedImages.length >= _maxStoryPhotos)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 20),
+                    child: GestureDetector(
+                      onTap: () {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Ajout de stickers')),
+                        );
+                      },
+                      child: SvgPicture.asset(
+                        'assets/sticker.svg',
+                        width: 28,
+                        height: 28,
+                        colorFilter: const ColorFilter.mode(
+                          Colors.white,
+                          BlendMode.srcIn,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Bouton flash - visible uniquement pendant la capture
+                if (_capturedImages.isEmpty &&
+                    _capturedImages.length < _maxStoryPhotos)
+                  GestureDetector(
+                    onTap: () {
+                      // passer a la camera avant si elle est arriere et inverse
+                      if (_cameraController != null) {
+                        _cameraController!.setFlashMode(
+                          _cameraController!.value.flashMode == FlashMode.off
+                              ? FlashMode.torch
+                              : FlashMode.off,
+                        );
+                      }
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 20),
+                      child: SvgPicture.asset(
+                        'assets/flash.svg',
+                        width: 28,
+                        height: 28,
+                        colorFilter: const ColorFilter.mode(
+                          Colors.white,
+                          BlendMode.srcIn,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Bouton de sélection de la grille
+                // Bouton mode grille
+                !_isVideoMode && _capturedImages.isEmpty
+                    ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 2,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.65),
+                        borderRadius: BorderRadius.circular(25),
+                        border: Border.all(
+                          color: Color(0XFFD9D9D9).withOpacity(0.5),
+                          width: 4,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+
+                        children: [
+                          GestureDetector(
+                            onTap: () {
+                              _cycleGridType(GridType.horizontal);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(7),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color:
+                                    _selectedGridType == GridType.horizontal
+                                        ? Color(0XFFFFCD00)
+                                        : Colors.transparent,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: SvgPicture.asset(
+                                'assets/hori.svg',
+                                width: 20,
+                                height: 20,
+                                colorFilter: const ColorFilter.mode(
+                                  Colors.white,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(height: 8),
+                          GestureDetector(
+                            onTap: () {
+                              _cycleGridType(GridType.vertical);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(7),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color:
+                                    _selectedGridType == GridType.vertical
+                                        ? Color(0XFFFFCD00)
+                                        : Colors.transparent,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: SvgPicture.asset(
+                                'assets/verti.svg',
+                                width: 20,
+                                height: 20,
+                                colorFilter: const ColorFilter.mode(
+                                  Colors.white,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          GestureDetector(
+                            onTap: () {
+                              _cycleGridType(GridType.none);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(7),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color:
+                                    _selectedGridType == GridType.none
+                                        ? Color(0XFFFFCD00)
+                                        : Colors.transparent,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: SvgPicture.asset(
+                                'assets/bottomright.svg',
+                                width: 20,
+                                height: 20,
+                                colorFilter: const ColorFilter.mode(
+                                  Colors.white,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                    : SizedBox.shrink(),
+              ],
+            ),
+          ),
+
+          // Contrôles inférieurs
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 20,
+            child: Column(
+              children: [
+                // Mode sélection
+                _capturedImages.length < _maxStoryPhotos
+                    ? SizedBox(
+                      height: 100,
+                      child: PageView.builder(
+                        controller: _pageController,
+                        itemCount: icons.length,
+                        scrollDirection: Axis.horizontal,
+                        onPageChanged: (value) {
+                          setState(() {
+                            selectedIndex = value;
+                          });
+                        },
+                        physics: BouncingScrollPhysics(),
+                        itemBuilder: (context, index) {
+                          double scale = _calculateScale(index);
+                          return Center(
+                            child: AnimatedContainer(
+                              duration: Duration(milliseconds: 300),
+                              curve: Curves.easeInOut,
+                              width:
+                                  selectedIndex == index
+                                      ? 100 * scale
+                                      : 70 *
+                                          scale, // Augmenter la taille pour l'élément courant
+                              height:
+                                  selectedIndex == index
+                                      ? 100 * scale
+                                      : 70 * scale,
+                              margin: EdgeInsets.symmetric(horizontal: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.8),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color:
+                                      index == selectedIndex
+                                          ? Colors.white
+                                          : Colors.white,
+                                  width: 2,
+                                ),
+                                boxShadow:
+                                    index == selectedIndex
+                                        ? [
+                                          BoxShadow(
+                                            color: Colors.white,
+                                            blurRadius: 5,
+                                          ),
+                                        ]
+                                        : [],
+                              ),
+                              child: GestureDetector(
+                                onTap:
+                                    _isCaptureInProgress
+                                        ? null
+                                        : () {
+                                          if (_isVideoMode) {
+                                            if (_cameraController
+                                                    ?.value
+                                                    .isRecordingVideo ==
+                                                true) {
+                                              _stopVideoRecording();
+                                            } else {
+                                              _startVideoRecording();
+                                            }
+                                          } else {
+                                            _captureImage();
+                                          }
+                                        },
+                                child:
+                                    _isVideoMode &&
+                                            _cameraController
+                                                    ?.value
+                                                    .isRecordingVideo ==
+                                                true
+                                        ? Container(
+                                          width: 50,
+                                          height: 50,
+                                          decoration: BoxDecoration(
+                                            color: Colors.red,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        )
+                                        : SvgPicture.asset(
+                                          icons[index],
+                                          width: 50,
+                                          height: 50,
+                                          colorFilter:
+                                              _isVideoMode
+                                                  ? ColorFilter.mode(
+                                                    Colors.red.withOpacity(0.8),
+                                                    BlendMode.srcIn,
+                                                  )
+                                                  : null,
+                                        ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    )
+                    : SizedBox.shrink(),
+                SizedBox(height: 20),
+                // Boutons de contrôle
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    // Bouton galerie
+                    _capturedImages.isEmpty
+                        ? SvgPicture.asset(
+                          'assets/gallery.svg',
+                          width: 32,
+                          height: 32,
+                          colorFilter: const ColorFilter.mode(
+                            Colors.white,
+                            BlendMode.srcIn,
+                          ),
+                        )
+                        : SizedBox.shrink(),
+                    _capturedImages.length < _maxStoryPhotos
+                        ? Text(
+                          selectedIndex == 0
+                              ? 'Story'
+                              : selectedIndex == 1
+                              ? 'Short'
+                              : 'Challenge',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                          ),
+                        )
+                        : SizedBox.shrink(),
+                    // Bouton de capture principal
+
+                    //Button pour reverse la camera
+                    _capturedImages.length < _maxStoryPhotos
+                        ? GestureDetector(
+                          onTap: _switchCamera,
+                          child: SvgPicture.asset(
+                            'assets/camera_reverse.svg',
+                            width: 32,
+                            height: 32,
+                            colorFilter: const ColorFilter.mode(
+                              Colors.white,
+                              BlendMode.srcIn,
+                            ),
+                          ),
+                        )
+                        : SizedBox.shrink(),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Indicateur au milieu pour le mode défi si nécessaire
+        ],
+      ),
+    );
+  }
+}
+
+// Classe pour stocker les informations sur une image capturée
+class CapturedImage {
+  final String path;
+  final GridType gridType;
+
+  CapturedImage({required this.path, required this.gridType});
+}
+
+// Peintre personnalisé pour dessiner les grilles
+class GridPainter extends CustomPainter {
+  final GridType gridType;
+
+  GridPainter({required this.gridType});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Si mode sans grille, ne rien dessiner
+    if (gridType == GridType.none) {
+      return;
+    }
+
+    final paint =
+        Paint()
+          ..color = Colors.white.withOpacity(0.7)
+          ..strokeWidth = 1.0
+          ..style = PaintingStyle.stroke;
+
+    if (gridType == GridType.horizontal) {
+      // Grille horizontale - 1 ligne au milieu
+      final y = size.height / 2;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    } else if (gridType == GridType.vertical) {
+      // Grille verticale - 1 colonne au milieu
+      final x = size.width / 2;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) {
+    return true;
+  }
+}
+
+// Peintre personnalisé pour dessiner la progression circulaire comme Instagram
+class CircularProgressPainter extends CustomPainter {
+  final double progress; // 0.0 à 1.0
+  final Color color;
+
+  CircularProgressPainter({required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint =
+        Paint()
+          ..color = color
+          ..strokeWidth = 3.0
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+
+    // Dessiner l'arc de progression
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2, // Commencer en haut
+      progress *
+          2 *
+          math.pi, // Angle basé sur la progression (tour complet = 2*pi)
+      false,
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CircularProgressPainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.color != color;
+  }
+}
+
+// Écran de prévisualisation de l'histoire complète
+class StoryPreviewScreen extends StatefulWidget {
+  final List<CapturedImage> capturedImages;
+
+  const StoryPreviewScreen({super.key, required this.capturedImages});
+
+  @override
+  State<StoryPreviewScreen> createState() => _StoryPreviewScreenState();
+}
+
+class _StoryPreviewScreenState extends State<StoryPreviewScreen>
+    with SingleTickerProviderStateMixin {
+  late PageController _pageController;
+  late AnimationController _progressController;
+  int _currentIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+    _progressController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 5), // Durée d'affichage de chaque photo
+    )..addListener(() {
+      if (_progressController.status == AnimationStatus.completed) {
+        _nextStory();
+      }
+    });
+
+    _progressController.forward();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _progressController.dispose();
+    super.dispose();
+  }
+
+  void _nextStory() {
+    if (_currentIndex < widget.capturedImages.length - 1) {
+      setState(() {
+        _currentIndex++;
+        _pageController.animateToPage(
+          _currentIndex,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+        );
+      });
+      _progressController.forward(from: 0.0);
+    } else {
+      Navigator.pop(context); // Retourner à l'écran de la caméra
+    }
+  }
+
+  void _previousStory() {
+    if (_currentIndex > 0) {
+      setState(() {
+        _currentIndex--;
+        _pageController.animateToPage(
+          _currentIndex,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+        );
+      });
+      _progressController.forward(from: 0.0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onTapUp: (details) {
+          final screenWidth = MediaQuery.of(context).size.width;
+          if (details.globalPosition.dx < screenWidth / 3) {
+            _previousStory();
+          } else {
+            _nextStory();
+          }
+        },
+        child: Stack(
+          children: [
+            // Barres de progression en haut de l'écran
+            Positioned(
+              top: 50,
+              left: 10,
+              right: 10,
+              child: Row(
+                children: List.generate(
+                  widget.capturedImages.length,
+                  (index) => Expanded(
+                    child: Container(
+                      height: 2,
+                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                      child: LinearProgressIndicator(
+                        value:
+                            index < _currentIndex
+                                ? 1.0
+                                : index == _currentIndex
+                                ? _progressController.value
+                                : 0.0,
+                        backgroundColor: Colors.grey.withOpacity(0.5),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // Carrousel des images capturées
+            PageView.builder(
+              controller: _pageController,
+              physics:
+                  const NeverScrollableScrollPhysics(), // Désactiver le défilement par glissement
+              itemCount: widget.capturedImages.length,
+              onPageChanged: (index) {
+                setState(() {
+                  _currentIndex = index;
+                });
+                _progressController.forward(from: 0.0);
+              },
+              itemBuilder: (context, index) {
+                final image = widget.capturedImages[index];
+
+                return SplitImageView(
+                  imagePath: image.path,
+                  gridType: image.gridType,
+                );
+              },
+            ),
+
+            // Bouton de fermeture en haut à droite
+            Positioned(
+              top: 40,
+              right: 10,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 30),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ),
+
+            // Bouton pour partager la story
+            Positioned(
+              bottom: 20,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.share),
+                  label: const Text('Share Story'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 12,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Sharing story...')),
+                    );
+                    // Ici, vous implémenteriez le partage réel
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Widget pour afficher une image divisée selon le type de grille
+class SplitImageView extends StatelessWidget {
+  final String imagePath;
+  final GridType gridType;
+
+  const SplitImageView({
+    super.key,
+    required this.imagePath,
+    required this.gridType,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (gridType == GridType.horizontal) {
+      // Affichage horizontal (deux colonnes)
+      return Row(
+        children: [
+          // Moitié gauche
+          Expanded(
+            child: ClipRect(
+              child: Transform.scale(
+                scale: 1.0,
+                alignment: Alignment.centerRight,
+                child: Image.file(File(imagePath), fit: BoxFit.cover),
+              ),
+            ),
+          ),
+          // Ligne centrale
+          Container(width: 1, color: Colors.white),
+          // Moitié droite
+          Expanded(
+            child: ClipRect(
+              child: Transform.scale(
+                scale: 1.0,
+                alignment: Alignment.centerLeft,
+                child: Image.file(File(imagePath), fit: BoxFit.cover),
+              ),
+            ),
+          ),
+        ],
+      );
+    } else {
+      // Affichage vertical (deux rangées)
+      return Column(
+        children: [
+          // Moitié supérieure
+          Expanded(
+            child: ClipRect(
+              child: Transform.scale(
+                scale: 1.0,
+                alignment: Alignment.bottomCenter,
+                child: Image.file(File(imagePath), fit: BoxFit.cover),
+              ),
+            ),
+          ),
+          // Ligne centrale
+          Container(height: 1, color: Colors.white),
+          // Moitié inférieure
+          Expanded(
+            child: ClipRect(
+              child: Transform.scale(
+                scale: 1.0,
+                alignment: Alignment.topCenter,
+                child: Image.file(File(imagePath), fit: BoxFit.cover),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+  }
+}
