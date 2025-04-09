@@ -7,6 +7,7 @@ import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:video_player/video_player.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -63,6 +64,12 @@ class CameraScreenState extends State<CameraScreen>
   bool _isRecording = false; // Track if video is being recorded
   // Liste pour stocker les images capturées
   List<CapturedImage> _capturedImages = [];
+  
+  // Max video duration in seconds
+  final int _maxVideoDuration = 45;
+  // Current video recording duration
+  int _currentVideoDuration = 0;
+  Timer? _videoTimer;
 
   // Contrôleur d'animation pour le bouton de capture
   late AnimationController _animationController;
@@ -107,6 +114,7 @@ class CameraScreenState extends State<CameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _cameraController?.dispose();
     _animationController.dispose();
+    _videoTimer?.cancel();
     super.dispose();
   }
 
@@ -257,7 +265,22 @@ class CameraScreenState extends State<CameraScreen>
       setState(() {
         _isCaptureInProgress = true;
         _isRecording = true;
+        _currentVideoDuration = 0;
       });
+      
+      // Start a timer to track recording duration and auto-stop at max duration
+      _videoTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        setState(() {
+          _currentVideoDuration++;
+        });
+        
+        // Auto-stop recording when max duration is reached
+        if (_currentVideoDuration >= _maxVideoDuration) {
+          _stopVideoRecording();
+          timer.cancel();
+        }
+      });
+      
       debugPrint('Started video recording');
     } on CameraException catch (e) {
       debugPrint('Error starting video recording: ${e.description}');
@@ -280,6 +303,10 @@ class CameraScreenState extends State<CameraScreen>
       return;
     }
 
+    // Cancel the timer if it's running
+    _videoTimer?.cancel();
+    _videoTimer = null;
+
     try {
       final XFile video = await _cameraController!.stopVideoRecording();
       setState(() {
@@ -295,10 +322,8 @@ class CameraScreenState extends State<CameraScreen>
 
       debugPrint('Video recorded to: $videoPath');
 
-      // Show confirmation
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Video recorded successfully!')),
-      );
+      // Show video preview
+      _showVideoPreview(videoPath);
     } on CameraException catch (e) {
       debugPrint('Error stopping video recording: ${e.description}');
       ScaffoldMessenger.of(context).showSnackBar(
@@ -309,6 +334,15 @@ class CameraScreenState extends State<CameraScreen>
         _isRecording = false;
       });
     }
+  }
+  
+  void _showVideoPreview(String videoPath) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => VideoPreviewScreen(videoPath: videoPath),
+      ),
+    );
   }
 
   Future<void> _captureImage() async {
@@ -715,11 +749,16 @@ class CameraScreenState extends State<CameraScreen>
                     ),
                     child: GestureDetector(
                       // switch video or camera mode
+                      
                       onTap: () async {
                         // If recording in progress, stop first
+                         setState(() {
+                            _selectedGridType = GridType.none;
+                          });
                         if (_isVideoMode &&
                             _cameraController?.value.isRecordingVideo == true) {
                           await _stopVideoRecording();
+                         
                         }
 
                         setState(() {
@@ -964,9 +1003,7 @@ class CameraScreenState extends State<CameraScreen>
                               ),
                               child: GestureDetector(
                                 onTap:
-                                    _isCaptureInProgress
-                                        ? null
-                                        : () {
+                                 () {
                                           if (_isVideoMode) {
                                             if (_cameraController
                                                     ?.value
@@ -986,25 +1023,60 @@ class CameraScreenState extends State<CameraScreen>
                                                     ?.value
                                                     .isRecordingVideo ==
                                                 true
-                                        ? Container(
-                                          width: 50,
-                                          height: 50,
-                                          decoration: BoxDecoration(
-                                            color: Colors.red,
-                                            shape: BoxShape.circle,
-                                          ),
+                                        ? Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            // Progress indicator 
+                                          index ==0 ?  SizedBox(
+                                              width: 70,
+                                              height: 70,
+                                              child: CustomPaint(
+                                                painter: CircularProgressPainter(
+                                                  progress: _currentVideoDuration / _maxVideoDuration,
+                                                  color: Colors.red,
+                                                ),
+                                              ),
+                                            ):SizedBox.shrink(),
+                                            // Inner record button
+                                            Container(
+                                              width: 50,
+                                              height: 50,
+                                              decoration: BoxDecoration(
+                                                color: Colors.red,
+                                                shape: BoxShape.circle,
+                                              ),
+                                            ),
+                                          ],
                                         )
-                                        : SvgPicture.asset(
-                                          icons[index],
-                                          width: 50,
-                                          height: 50,
-                                          colorFilter:
-                                              _isVideoMode
-                                                  ? ColorFilter.mode(
-                                                    Colors.red.withOpacity(0.8),
-                                                    BlendMode.srcIn,
-                                                  )
-                                                  : null,
+                                        : Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            // Show progress indicator for photo capture
+                                            if (!_isVideoMode && _capturedImages.isNotEmpty && index ==0)
+                                              SizedBox(
+                                                width: 70,
+                                                height: 70,
+                                                child: CustomPaint(
+                                                  painter: CircularProgressPainter(
+                                                    progress: _capturedImages.length / _maxStoryPhotos,
+                                                    color: Colors.black,
+                                                  ),
+                                                ),
+                                              ),
+                                            // Icon
+                                            SvgPicture.asset(
+                                              icons[index],
+                                              width: 50,
+                                              height: 50,
+                                              colorFilter:
+                                                  _isVideoMode
+                                                      ? ColorFilter.mode(
+                                                        Colors.red.withOpacity(0.8),
+                                                        BlendMode.srcIn,
+                                                      )
+                                                      : null,
+                                            ),
+                                          ],
                                         ),
                               ),
                             ),
@@ -1332,6 +1404,130 @@ class _StoryPreviewScreenState extends State<StoryPreviewScreen>
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// Écran de prévisualisation de vidéo
+class VideoPreviewScreen extends StatefulWidget {
+  final String videoPath;
+
+  const VideoPreviewScreen({super.key, required this.videoPath});
+
+  @override
+  State<VideoPreviewScreen> createState() => _VideoPreviewScreenState();
+}
+
+class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
+  late VideoPlayerController _videoPlayerController;
+  bool _isPlaying = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initVideoPlayer();
+  }
+
+  Future<void> _initVideoPlayer() async {
+    _videoPlayerController = VideoPlayerController.file(File(widget.videoPath));
+    await _videoPlayerController.initialize();
+    await _videoPlayerController.setLooping(true);
+    
+    // Auto-play when initialized
+    await _videoPlayerController.play();
+    
+    setState(() {
+      _isPlaying = true;
+    });
+  }
+
+  @override
+  void dispose() {
+    _videoPlayerController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // Video
+          Center(
+            child: _videoPlayerController.value.isInitialized
+                ? AspectRatio(
+                    aspectRatio: _videoPlayerController.value.aspectRatio,
+                    child: VideoPlayer(_videoPlayerController),
+                  )
+                : const CircularProgressIndicator(),
+          ),
+          
+          // Controls
+          Positioned(
+            bottom: 20,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                // Back button
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white, size: 30),
+                  onPressed: () => Navigator.pop(context),
+                ),
+                
+                // Play/Pause button
+                IconButton(
+                  icon: Icon(
+                    _isPlaying ? Icons.pause : Icons.play_arrow, 
+                    color: Colors.white, 
+                    size: 40
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      if (_isPlaying) {
+                        _videoPlayerController.pause();
+                      } else {
+                        _videoPlayerController.play();
+                      }
+                      _isPlaying = !_isPlaying;
+                    });
+                  },
+                ),
+                
+                // Share button
+                IconButton(
+                  icon: const Icon(Icons.share, color: Colors.white, size: 30),
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Sharing video...')),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          
+          // Video progress
+          Positioned(
+            bottom: 80,
+            left: 20,
+            right: 20,
+            child: _videoPlayerController.value.isInitialized
+                ? VideoProgressIndicator(
+                    _videoPlayerController,
+                    allowScrubbing: true,
+                    colors: const VideoProgressColors(
+                      playedColor: Colors.red,
+                      bufferedColor: Colors.grey,
+                      backgroundColor: Colors.white,
+                    ),
+                  )
+                : const SizedBox(),
+          ),
+        ],
       ),
     );
   }
