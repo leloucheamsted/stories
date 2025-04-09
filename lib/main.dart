@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
@@ -46,6 +45,7 @@ enum GridType {
   none, // Pas de grille, photo plein écran
   horizontal, // Séparation horizontale (deux rangées)
   vertical, // Séparation verticale (deux colonnes)
+  bottomRight, // Superposition de la caméra en mini cercle en bas à droite
 }
 
 class CameraScreen extends StatefulWidget {
@@ -354,7 +354,17 @@ class CameraScreenState extends State<CameraScreen>
       return;
     }
 
+ // verfiriez le type de grid
+    if (_selectedGridType == GridType.none && _capturedImages.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Select a grid type before capturing!'),
+        ),
+      );
+      return;
+    }
     // Vérifier si la limite d'images a été atteinte
+
     if (_capturedImages.length >= _maxStoryPhotos) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -393,7 +403,7 @@ class CameraScreenState extends State<CameraScreen>
           _selectedGridType =
               _selectedGridType == GridType.horizontal
                   ? GridType.vertical
-                  : GridType.horizontal;
+                  : _selectedGridType == GridType.vertical ? GridType.horizontal : GridType.bottomRight;
         }
       });
 
@@ -430,10 +440,12 @@ class CameraScreenState extends State<CameraScreen>
 
   // Construit la vue divisée avec caméra uniquement dans les zones vides
   Widget _buildSplitCameraView() {
-    // Si nous n'avons pas encore d'images et que le mode sans grille est sélectionné,
-    // afficher simplement la caméra en plein écran
-    if (_capturedImages.isEmpty && _selectedGridType == GridType.none) {
-      return _buildCameraPreview();
+    // Si nous n'avons pas encore d'images
+    if (_capturedImages.isEmpty) {
+      // En mode bottomRight ou none, afficher simplement la caméra en plein écran
+      if (_selectedGridType == GridType.none || _selectedGridType == GridType.bottomRight) {
+        return _buildCameraPreview();
+      }
     }
 
     // Trouver si des images existent pour les emplacements spécifiques
@@ -453,6 +465,43 @@ class CameraScreenState extends State<CameraScreen>
       }
     }
 
+    // Si une image a été prise en mode bottomRight, afficher l'image avec mini caméra
+    if (_capturedImages.isNotEmpty && capturedGridType == GridType.bottomRight) {
+      return Stack(
+        children: [
+          // Image en plein écran
+          Image.file(
+            File(topOrLeftImagePath!),
+            fit: BoxFit.cover,
+            width: double.infinity,
+            height: double.infinity,
+          ),
+          
+          // Mini caméra en bas à droite
+          Positioned(
+            bottom: 150,
+            right: 20,
+            child: Container(
+              width: 200,
+              height: 200,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 2),
+              ),
+              child: ClipOval(
+                child: Image.file(
+                  File(bottomOrRightImagePath!),
+                  fit: BoxFit.cover,
+                  width: 200,
+                  height: 200,
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    
     // Si une image a été prise en mode plein écran, l'afficher simplement
     if (_capturedImages.isNotEmpty && capturedGridType == GridType.none) {
       return Image.file(
@@ -510,7 +559,7 @@ class CameraScreenState extends State<CameraScreen>
           ),
         ],
       );
-    } else {
+    } else  {
       // Grille verticale (division gauche/droite)
       return Row(
         children: [
@@ -550,6 +599,7 @@ class CameraScreenState extends State<CameraScreen>
         ],
       );
     }
+  
   }
 
   // Widget pour l'aperçu de la caméra
@@ -860,6 +910,10 @@ class CameraScreenState extends State<CameraScreen>
                         children: [
                           GestureDetector(
                             onTap: () {
+                              if(_selectedGridType== GridType.horizontal){
+                                _cycleGridType(GridType.none);
+                                return;
+                              }
                               _cycleGridType(GridType.horizontal);
                             },
                             child: Container(
@@ -887,6 +941,10 @@ class CameraScreenState extends State<CameraScreen>
                           const SizedBox(height: 8),
                           GestureDetector(
                             onTap: () {
+                              if(_selectedGridType== GridType.vertical){
+                                _cycleGridType(GridType.none);
+                                return;
+                              }
                               _cycleGridType(GridType.vertical);
                             },
                             child: Container(
@@ -913,14 +971,18 @@ class CameraScreenState extends State<CameraScreen>
                           const SizedBox(height: 8),
                           GestureDetector(
                             onTap: () {
-                              _cycleGridType(GridType.none);
+                              if(_selectedGridType== GridType.bottomRight){
+                                _cycleGridType(GridType.none);
+                                return;
+                              }
+                              _cycleGridType(GridType.bottomRight);
                             },
                             child: Container(
                               padding: const EdgeInsets.all(7),
                               alignment: Alignment.center,
                               decoration: BoxDecoration(
                                 color:
-                                    _selectedGridType == GridType.none
+                                    _selectedGridType == GridType.bottomRight
                                         ? Color(0XFFFFCD00)
                                         : Colors.transparent,
                                 borderRadius: BorderRadius.circular(20),
@@ -952,7 +1014,7 @@ class CameraScreenState extends State<CameraScreen>
             child: Column(
               children: [
                 // Mode sélection
-                _capturedImages.length < _maxStoryPhotos
+               (_selectedGridType !=GridType.none && _capturedImages.length < _maxStoryPhotos) || (_selectedGridType == GridType.none && _capturedImages.isEmpty)
                     ? SizedBox(
                       height: 100,
                       child: PageView.builder(
