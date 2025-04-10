@@ -1,13 +1,21 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:camera_stories/Helpers/grid_painter.dart';
+import 'package:camera_stories/Models/capture_image.model.dart';
+import 'package:camera_stories/draggable_text.dart';
+import 'package:camera_stories/video_preview_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/rendering.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:video_player/video_player.dart';
 import 'package:image/image.dart' as img;
+import 'package:uuid/uuid.dart';
+import 'dart:ui' as ui;
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -65,6 +73,10 @@ class CameraScreenState extends State<CameraScreen>
   bool _isRecording = false; // Track if video is being recorded
   // Liste pour stocker les images capturées
   List<CapturedImage> _capturedImages = [];
+  
+  // Variables pour l'affichage direct de l'image fusionnée
+  File? _mergedImageFile;
+  bool _showMergedImage = false;
 
   // Max video duration in seconds
   final int _maxVideoDuration = 45;
@@ -76,12 +88,16 @@ class CameraScreenState extends State<CameraScreen>
   late AnimationController _animationController;
 
   // Type de grille sélectionné
-  GridType _selectedGridType = GridType.horizontal;
+  GridType _selectedGridType = GridType.none;
 
   // Nombre de photos dans notre histoire (exactement 2)
   final int _maxStoryPhotos = 2;
   final PageController _pageController = PageController(viewportFraction: 0.3);
   int selectedIndex = 0;
+List<EditableItem> items = [];
+  EditableItem? selectedItem;
+
+  GlobalKey previewContainer = GlobalKey();
 
   final List<String> icons = [
     'assets/story.svg',
@@ -439,24 +455,13 @@ class CameraScreenState extends State<CameraScreen>
         }
       });
 
-      // Si on a pris toutes les photos nécessaires, proposer d'afficher la prévisualisation
-      if (_capturedImages.length == _maxStoryPhotos) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('All photos captured! Review your story?'),
-            action: SnackBarAction(label: 'Preview', onPressed: _previewStory),
-          ),
-        );
+      // Si on a pris toutes les photos nécessaires, fusionner immédiatement les images
+      if (_capturedImages.length == _maxStoryPhotos && _capturedImages[0].gridType != GridType.none) {
+        _processMergedImage();
+  
       }
       // Si c'est la première capture, afficher un message pour informer l'utilisateur
       else if (_capturedImages.length == 1) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'First photo captured! Take one more for your story.',
-            ),
-          ),
-        );
       }
     } catch (e) {
       debugPrint('Error capturing image: $e');
@@ -469,38 +474,71 @@ class CameraScreenState extends State<CameraScreen>
       ).showSnackBar(SnackBar(content: Text('Failed to capture image: $e')));
     }
   }
+  void _addTextItem() {
+    items.add(
+      EditableItem(
+        id: const Uuid().v4(),
+        text: 'Texte',
+        position: Offset(100, 100),
+        color: Colors.white,
+      ),
+    );
+    setState(() {});
+  }
+  Future<void> _saveToGallery() async {
+    RenderRepaintBoundary boundary = previewContainer.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+    ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    Uint8List pngBytes = byteData!.buffer.asUint8List();
 
+   // final result = await ImageGallerySaver.saveImage(pngBytes);
+   // print(result);
+  }
   // Construit la vue divisée avec caméra uniquement dans les zones vides
-  Widget _buildSplitCameraView() {
+  Widget _buildSplitCameraViewFinal() {
+    // Si nous avons une image fusionnée, l'afficher en priorité
+    if (_showMergedImage && _mergedImageFile != null) {
+      return Stack(
+        children: [
+          // Image fusionnée en plein écran
+          Image.file(
+            _mergedImageFile!,
+            fit: BoxFit.contain,
+            width: double.infinity,
+            height: double.infinity,
+          ),
+          
+        ],
+      );
+    }
+    
     // Si nous n'avons pas encore d'images
     if (_capturedImages.isEmpty) {
       // En mode bottomRight ou none, afficher simplement la caméra en plein écran
-      if (_selectedGridType == GridType.none ||
-          _selectedGridType == GridType.bottomRight) {
+      if (_selectedGridType == GridType.none || _selectedGridType == GridType.bottomRight) {
         return _buildCameraPreview();
       }
     }
-
+    
     // Trouver si des images existent pour les emplacements spécifiques
     String? topOrLeftImagePath;
     String? bottomOrRightImagePath;
     GridType? capturedGridType;
-
+    
     // Parcourir les images capturées pour placer chacune au bon endroit
     for (int i = 0; i < _capturedImages.length; i++) {
       final image = _capturedImages[i];
       capturedGridType = image.gridType;
-
+      
       if (i == 0) {
         topOrLeftImagePath = image.path;
       } else if (i == 1) {
         bottomOrRightImagePath = image.path;
       }
     }
-
+    
     // Si une image a été prise en mode bottomRight, afficher l'image avec mini caméra
-    if (_capturedImages.isNotEmpty &&
-        capturedGridType == GridType.bottomRight) {
+    if (_capturedImages.isNotEmpty && capturedGridType == GridType.bottomRight) {
       return Stack(
         children: [
           // Image en plein écran
@@ -510,7 +548,7 @@ class CameraScreenState extends State<CameraScreen>
             width: double.infinity,
             height: double.infinity,
           ),
-
+          
           // Mini caméra en bas à droite
           Positioned(
             bottom: 150,
@@ -522,22 +560,24 @@ class CameraScreenState extends State<CameraScreen>
                 shape: BoxShape.circle,
                 border: Border.all(color: Colors.white, width: 2),
               ),
-              child: ClipOval(
-                child:
-                  bottomOrRightImagePath != null
-                    ? Image.file(
+              child: bottomOrRightImagePath != null
+                ? ClipOval(
+                    child: Image.file(
                       File(bottomOrRightImagePath),
                       fit: BoxFit.cover,
-                      width: double.infinity,
-                    )
-                    : _buildCameraPreview(),
-              ),
+                      width: 200,
+                      height: 200,
+                    ),
+                  )
+                : ClipOval(
+                    child: _buildCameraPreview(),
+                  ),
             ),
           ),
         ],
       );
     }
-
+    
     // Si une image a été prise en mode plein écran, l'afficher simplement
     if (_capturedImages.isNotEmpty && capturedGridType == GridType.none) {
       return Image.file(
@@ -547,15 +587,15 @@ class CameraScreenState extends State<CameraScreen>
         height: double.infinity,
       );
     }
-
+    
     // Vérifier dans quelle disposition les placer
     // Si nous avons des images, nous utilisons leur type de grille, sinon la sélection actuelle
     final bool isHorizontalGrid =
         _capturedImages.isEmpty
             ? _selectedGridType == GridType.horizontal
             : capturedGridType == GridType.horizontal;
-
-    if (!isHorizontalGrid) {
+    
+    if (isHorizontalGrid) {
       // Grille horizontale (division haut/bas)
       return Column(
         children: [
@@ -573,10 +613,10 @@ class CameraScreenState extends State<CameraScreen>
               ],
             ),
           ),
-
+          
           // Ligne de séparation
           Container(height: 1, color: Colors.white.withOpacity(0.7)),
-
+          
           // Moitié inférieure
           Expanded(
             child: Stack(
@@ -610,10 +650,10 @@ class CameraScreenState extends State<CameraScreen>
                     )
                     : _buildCameraPreview(), // Caméra seulement si aucune image n'est prise
           ),
-
+          
           // Ligne de séparation
           Container(width: 1, color: Colors.white.withOpacity(0.7)),
-
+          
           // Moitié droite
           Expanded(
             child: Stack(
@@ -627,10 +667,8 @@ class CameraScreenState extends State<CameraScreen>
                     : _buildCameraPreview(),
                 if (bottomOrRightImagePath == null && _capturedImages.isEmpty)
                   Container(color: Colors.black.withOpacity(0.8)),
-                // Caméra seulement si aucune image n'est prise
               ],
             ),
-            // Caméra seulement si aucune image n'est prise
           ),
         ],
       );
@@ -671,192 +709,124 @@ class CameraScreenState extends State<CameraScreen>
   }
 
   // Fonction pour fusionner les images en une seule selon l'orientation
-  Future<File?> _mergeImages() async {
-    if (_capturedImages.length < 2) return null;
+Future<File?> _mergeImages() async {
+  if (_capturedImages.length < 2) return null;
 
-    try {
-      // Decode les deux images
-      final image1 = img.decodeImage(
-        await File(_capturedImages[0].path).readAsBytes(),
-      );
-      final image2 = img.decodeImage(
-        await File(_capturedImages[1].path).readAsBytes(),
-      );
+  try {
+    final file1 = File(_capturedImages[0].path);
+    final file2 = File(_capturedImages[1].path);
 
-      if (image1 == null || image2 == null) return null;
+    final image1Bytes = await file1.readAsBytes();
+    final image2Bytes = await file2.readAsBytes();
 
-      late img.Image merged;
+    final image1 = img.decodeImage(image1Bytes);
+    final image2 = img.decodeImage(image2Bytes);
 
-      // Créer une image fusionnée selon le type de grille
-      if (_capturedImages[0].gridType == GridType.horizontal) {
-        // Fusionner horizontalement (une image au-dessus de l'autre)
-        merged = img.Image(
-          width: image1.width + image2.width,
-          height: image1.height,
-        );
-        img.compositeImage(merged, image1, dstX: 0, dstY: 0);
-        img.compositeImage(merged, image2, dstX: image1.width, dstY: 0);
-      } else if (_capturedImages[0].gridType == GridType.vertical) {
-        // Fusionner verticalement (une image à côté de l'autre)
-        merged = img.Image(
-          width: image1.width,
-          height: image1.height + image2.height,
-        );
-        img.compositeImage(merged, image1, dstX: 0, dstY: 0);
-        img.compositeImage(merged, image2, dstX: 0, dstY: image1.height);
-      } else if (_capturedImages[0].gridType == GridType.bottomRight) {
-        // Dessiner directement sur l'image principale sans utiliser d'intermédiaire
-        
-        // Copier l'image de fond
-        merged = img.copyResize(
-          image1,
-          width: image1.width,
-          height: image1.height,
-        );
-        
-        // Redimensionner la seconde image pour l'insérer en cercle - taille doublée
-        final circleSize = image1.width ~/ 3 * 2; // Doublé la taille du cercle
-        final resizedImage2 = img.copyResize(
-          image2,
-          width: circleSize,
-          height: circleSize,
-        );
-        
-        // Position du cercle en bas à droite
-        final posX = merged.width - circleSize - 20;
-        final posY = merged.height - circleSize - 20;
-        
-        // Rayon du cercle
-        final radius = circleSize / 2;
-        
-        // Centre du cercle relatif à la position
-        final centerX = radius;
-        final centerY = radius;
-        
-        // Dessiner directement sur l'image fusionnée en appliquant un masque circulaire
-        for (int y = 0; y < circleSize; y++) {
-          for (int x = 0; x < circleSize; x++) {
-            // Position absolue dans l'image fusionnée
-            final absX = posX + x;
-            final absY = posY + y;
-            
-            // Vérifier si le pixel est dans les limites
-            if (absX >= 0 && absX < merged.width && absY >= 0 && absY < merged.height) {
-              // Distance au centre du cercle
-              final dx = x - centerX;
-              final dy = y - centerY;
-              final distance = math.sqrt(dx * dx + dy * dy);
-              
-              // Dessiner bordure blanche
-              if (distance <= radius && distance >= radius - 2) {
-                // Bordure blanche
-                merged.setPixel(absX, absY, img.ColorRgba8(255, 255, 255, 255));
-              } 
-              // Dessiner l'intérieur du cercle
-              else if (distance < radius - 2) {
-                // Copier le pixel de la seconde image
-                merged.setPixel(absX, absY, resizedImage2.getPixel(x, y));
-              }
-              // Ne rien faire pour les pixels en dehors du cercle (garder l'image de fond)
-            }
+    if (image1 == null || image2 == null) return null;
+
+    final gridType = _capturedImages[0].gridType;
+
+    late img.Image merged;
+
+    // Fonction de redimensionnement intelligent
+    img.Image _resizeImage(img.Image image, int targetWidth, int targetHeight) {
+      return img.copyResize(image, width: targetWidth, height: targetHeight);
+    }
+
+    // Fusion selon le type de grille
+    if (gridType == GridType.vertical) {
+      final width = image1.width;
+      final height = image1.height + image2.height;
+
+      merged = img.Image(width, height);
+      img.copyInto(merged, image1, blend: false, dstX: 0, dstY: 0);
+      img.copyInto(merged, image2, blend: false, dstX: 0, dstY: image1.height);
+
+    } else if (gridType == GridType.horizontal) {
+      final height = image1.height;
+      final width = image1.width + image2.width;
+
+      merged = img.Image(width, height);
+      img.copyInto(merged, image1, blend: false, dstX: 0, dstY: 0);
+      img.copyInto(merged, image2, blend: false, dstX: image1.width, dstY: 0);
+
+    } else if (gridType == GridType.bottomRight) {
+      merged = img.copyResize(image1, width: image1.width, height: image1.height);
+
+      final circleSize = image1.width ~/ 2;
+      final resizedImage2 = img.copyResizeCropSquare(image2, circleSize);
+
+      final posX = merged.width - circleSize - 20;
+      final posY = merged.height - circleSize - 20;
+
+      for (int y = 0; y < circleSize; y++) {
+        for (int x = 0; x < circleSize; x++) {
+          final dx = x - circleSize / 2;
+          final dy = y - circleSize / 2;
+          final distance = math.sqrt(dx * dx + dy * dy);
+
+          if (distance <= circleSize / 2) {
+            final color = resizedImage2.getPixel(x, y);
+            merged.setPixel(posX + x, posY + y, color);
           }
         }
-      } else {
-        // Si GridType.none, simplement retourner la première image
-        final directory = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final outputPath = "${directory.path}/final_${timestamp}.jpg";
-        await File(_capturedImages[0].path).copy(outputPath);
-        return File(outputPath);
       }
 
-      // Sauvegarder l'image fusionnée - utiliser PNG pour préserver la transparence si nécessaire
-      final Directory tempDir = await getTemporaryDirectory();
-      final bool hasBorderCircle = _capturedImages[0].gridType == GridType.bottomRight;
-      
-      // Sauvegarder en PNG si on a un cercle (pour la transparence), sinon JPG
-      if (hasBorderCircle) {
-        final outputPath = "${tempDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.png";
-        final file = File(outputPath);
-        await file.writeAsBytes(img.encodePng(merged));
-        return file;
-      } else {
-        final outputPath = "${tempDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.jpg";
-        final file = File(outputPath);
-        await file.writeAsBytes(img.encodeJpg(merged));
-        return file;
-      }
-    } catch (e) {
-      debugPrint('Error merging images: $e');
-      return null;
+    } else {
+      // Aucune fusion — retourne simplement la première image
+      return file1;
     }
+
+    // Compression et enregistrement de l'image fusionnée
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+    // Appliquer une compression
+    final compressedBytes = await FlutterImageCompress.compressWithList(
+      Uint8List.fromList(img.encodeJpg(merged)), // Conversion en JPG
+      minWidth: 800, // Largeur minimale pour la compression
+      minHeight: 600, // Hauteur minimale pour la compression
+      quality: 85, // Taux de compression
+    );
+
+    final mergedFile = File(path);
+    await mergedFile.writeAsBytes(compressedBytes);
+
+    return mergedFile;
+
+  } catch (e) {
+    debugPrint('Fusion échouée : $e');
+    return null;
   }
-
-  // Fonction pour prévisualiser la story complète
-  Future<void> _previewStory() async {
-    if (_capturedImages.isEmpty) {
+}
+  // Fonction pour traiter et afficher l'image fusionnée directement
+  Future<void> _processMergedImage() async {
+    final mergedFile = await _mergeImages();
+    if (mergedFile != null && mounted) {
+      setState(() {
+        _mergedImageFile = mergedFile;
+        _showMergedImage = true;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Take at least one photo first!')),
-      );
-      return;
-    }
-
-    // Si nous avons plusieurs images et que le type de grille n'est pas none,
-    // fusionner les images en une seule
-    if (_capturedImages.length >= 2 &&
-        _capturedImages[0].gridType != GridType.none) {
-      final mergedFile = await _mergeImages();
-
-      if (mergedFile != null) {
-        // Créer une nouvelle liste avec l'image fusionnée
-        final mergedImage = CapturedImage(
-          path: mergedFile.path,
-          gridType: GridType.none,
-        );
-
-        // Afficher l'image fusionnée
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ImagePreviewScreen(image: mergedImage),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Failed to merge images')));
-      }
-    } else if (_capturedImages.length == 1) {
-      // Pour une seule image, l'afficher directement
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => ImagePreviewScreen(image: _capturedImages[0]),
-        ),
+        const SnackBar(content: Text('Images merged! You can now share or edit.')),
       );
     } else {
-      // Comportement classique pour GridType.none avec plusieurs images
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder:
-              (context) => StoryPreviewScreen(capturedImages: _capturedImages),
-        ),
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to merge images. Please try again.')),
       );
     }
   }
+
 
   @override
   Widget build(BuildContext context) {
-    final screenSize = MediaQuery.of(context).size;
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
           // Section d'aperçu de la caméra avec les grilles remplies
-          _buildSplitCameraView(),
-
+       _buildSplitCameraViewFinal(),
+       ...items.map((item) => EditableTextWidget(item: item)),
           // Barre supérieure avec boutons
           SafeArea(
             child: Padding(
@@ -873,6 +843,8 @@ class CameraScreenState extends State<CameraScreen>
                             setState(() {
                               _capturedImages.clear();
                               _selectedGridType = GridType.none;
+                              _showMergedImage = false;
+                              _mergedImageFile = null;
                             });
                           } else {
                             Navigator.pop(context);
@@ -957,9 +929,7 @@ class CameraScreenState extends State<CameraScreen>
                     margin: const EdgeInsets.only(bottom: 20),
                     child: GestureDetector(
                       onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Ajout de texte')),
-                        );
+                      _addTextItem();
                       },
                       child: SvgPicture.asset(
                         'assets/text.svg',
@@ -1423,505 +1393,6 @@ class CameraScreenState extends State<CameraScreen>
           ),
 
           // Indicateur au milieu pour le mode défi si nécessaire
-        ],
-      ),
-    );
-  }
-}
-
-// Classe pour stocker les informations sur une image capturée
-class CapturedImage {
-  final String path;
-  final GridType gridType;
-
-  CapturedImage({required this.path, required this.gridType});
-}
-
-// Peintre personnalisé pour dessiner les grilles
-class GridPainter extends CustomPainter {
-  final GridType gridType;
-
-  GridPainter({required this.gridType});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    // Si mode sans grille, ne rien dessiner
-    if (gridType == GridType.none) {
-      return;
-    }
-
-    final paint =
-        Paint()
-          ..color = Colors.white.withOpacity(0.7)
-          ..strokeWidth = 1.0
-          ..style = PaintingStyle.stroke;
-
-    if (gridType == GridType.horizontal) {
-      // Grille horizontale - 1 ligne au milieu
-      final y = size.height / 2;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
-    } else if (gridType == GridType.vertical) {
-      // Grille verticale - 1 colonne au milieu
-      final x = size.width / 2;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) {
-    return true;
-  }
-}
-
-// Peintre personnalisé pour dessiner la progression circulaire comme Instagram
-class CircularProgressPainter extends CustomPainter {
-  final double progress; // 0.0 à 1.0
-  final Color color;
-
-  CircularProgressPainter({required this.progress, required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint =
-        Paint()
-          ..color = color
-          ..strokeWidth = 3.0
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round;
-
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2;
-
-    // Dessiner l'arc de progression
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius),
-      -math.pi / 2, // Commencer en haut
-      progress *
-          2 *
-          math.pi, // Angle basé sur la progression (tour complet = 2*pi)
-      false,
-      paint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CircularProgressPainter oldDelegate) {
-    return oldDelegate.progress != progress || oldDelegate.color != color;
-  }
-}
-
-// Écran de prévisualisation de l'histoire complète
-class StoryPreviewScreen extends StatefulWidget {
-  final List<CapturedImage> capturedImages;
-
-  const StoryPreviewScreen({super.key, required this.capturedImages});
-
-  @override
-  State<StoryPreviewScreen> createState() => _StoryPreviewScreenState();
-}
-
-class _StoryPreviewScreenState extends State<StoryPreviewScreen>
-    with SingleTickerProviderStateMixin {
-  late PageController _pageController;
-  late AnimationController _progressController;
-  int _currentIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _pageController = PageController();
-    _progressController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 5), // Durée d'affichage de chaque photo
-    )..addListener(() {
-      if (_progressController.status == AnimationStatus.completed) {
-        _nextStory();
-      }
-    });
-
-    _progressController.forward();
-  }
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    _progressController.dispose();
-    super.dispose();
-  }
-
-  void _nextStory() {
-    if (_currentIndex < widget.capturedImages.length - 1) {
-      setState(() {
-        _currentIndex++;
-        _pageController.animateToPage(
-          _currentIndex,
-          duration: const Duration(milliseconds: 500),
-          curve: Curves.easeInOut,
-        );
-      });
-      _progressController.forward(from: 0.0);
-    } else {
-      Navigator.pop(context); // Retourner à l'écran de la caméra
-    }
-  }
-
-  void _previousStory() {
-    if (_currentIndex > 0) {
-      setState(() {
-        _currentIndex--;
-        _pageController.animateToPage(
-          _currentIndex,
-          duration: const Duration(milliseconds: 500),
-          curve: Curves.easeInOut,
-        );
-      });
-      _progressController.forward(from: 0.0);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTapUp: (details) {
-          final screenWidth = MediaQuery.of(context).size.width;
-          if (details.globalPosition.dx < screenWidth / 3) {
-            _previousStory();
-          } else {
-            _nextStory();
-          }
-        },
-        child: Stack(
-          children: [
-            // Barres de progression en haut de l'écran
-            Positioned(
-              top: 50,
-              left: 10,
-              right: 10,
-              child: Row(
-                children: List.generate(
-                  widget.capturedImages.length,
-                  (index) => Expanded(
-                    child: Container(
-                      height: 2,
-                      margin: const EdgeInsets.symmetric(horizontal: 2),
-                      child: LinearProgressIndicator(
-                        value:
-                            index < _currentIndex
-                                ? 1.0
-                                : index == _currentIndex
-                                ? _progressController.value
-                                : 0.0,
-                        backgroundColor: Colors.grey.withOpacity(0.5),
-                        valueColor: const AlwaysStoppedAnimation<Color>(
-                          Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // Carrousel des images capturées
-            PageView.builder(
-              controller: _pageController,
-              physics:
-                  const NeverScrollableScrollPhysics(), // Désactiver le défilement par glissement
-              itemCount: widget.capturedImages.length,
-              onPageChanged: (index) {
-                setState(() {
-                  _currentIndex = index;
-                });
-                _progressController.forward(from: 0.0);
-              },
-              itemBuilder: (context, index) {
-                final image = widget.capturedImages[index];
-
-                return SplitImageView(
-                  imagePath: image.path,
-                  gridType: image.gridType,
-                );
-              },
-            ),
-
-            // Bouton de fermeture en haut à droite
-            Positioned(
-              top: 40,
-              right: 10,
-              child: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white, size: 30),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ),
-
-            // Bouton pour partager la story
-            Positioned(
-              bottom: 20,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.share),
-                  label: const Text('Share Story'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 12,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Sharing story...')),
-                    );
-                    // Ici, vous implémenteriez le partage réel
-                  },
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// Écran de prévisualisation de vidéo
-class VideoPreviewScreen extends StatefulWidget {
-  final String videoPath;
-
-  const VideoPreviewScreen({super.key, required this.videoPath});
-
-  @override
-  State<VideoPreviewScreen> createState() => _VideoPreviewScreenState();
-}
-
-class _VideoPreviewScreenState extends State<VideoPreviewScreen> {
-  late VideoPlayerController _videoPlayerController;
-  bool _isPlaying = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initVideoPlayer();
-  }
-
-  Future<void> _initVideoPlayer() async {
-    _videoPlayerController = VideoPlayerController.file(File(widget.videoPath));
-    await _videoPlayerController.initialize();
-    await _videoPlayerController.setLooping(true);
-
-    // Auto-play when initialized
-    await _videoPlayerController.play();
-
-    setState(() {
-      _isPlaying = true;
-    });
-  }
-
-  @override
-  void dispose() {
-    _videoPlayerController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // Video
-          Center(
-            child:
-                _videoPlayerController.value.isInitialized
-                    ? AspectRatio(
-                      aspectRatio: _videoPlayerController.value.aspectRatio,
-                      child: VideoPlayer(_videoPlayerController),
-                    )
-                    : const CircularProgressIndicator(),
-          ),
-
-          // Controls
-          Positioned(
-            bottom: 20,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                // Back button
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white, size: 30),
-                  onPressed: () => Navigator.pop(context),
-                ),
-
-                // Play/Pause button
-                IconButton(
-                  icon: Icon(
-                    _isPlaying ? Icons.pause : Icons.play_arrow,
-                    color: Colors.white,
-                    size: 40,
-                  ),
-                  onPressed: () {
-                    setState(() {
-                      if (_isPlaying) {
-                        _videoPlayerController.pause();
-                      } else {
-                        _videoPlayerController.play();
-                      }
-                      _isPlaying = !_isPlaying;
-                    });
-                  },
-                ),
-
-                // Share button
-                IconButton(
-                  icon: const Icon(Icons.share, color: Colors.white, size: 30),
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Sharing video...')),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-
-          // Video progress
-          Positioned(
-            bottom: 80,
-            left: 20,
-            right: 20,
-            child:
-                _videoPlayerController.value.isInitialized
-                    ? VideoProgressIndicator(
-                      _videoPlayerController,
-                      allowScrubbing: true,
-                      colors: const VideoProgressColors(
-                        playedColor: Colors.red,
-                        bufferedColor: Colors.grey,
-                        backgroundColor: Colors.white,
-                      ),
-                    )
-                    : const SizedBox(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// Widget pour afficher une image divisée selon le type de grille
-class SplitImageView extends StatelessWidget {
-  final String imagePath;
-  final GridType gridType;
-
-  const SplitImageView({
-    super.key,
-    required this.imagePath,
-    required this.gridType,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (gridType == GridType.horizontal) {
-      // Affichage horizontal (deux colonnes)
-      return Row(
-        children: [
-          // Moitié gauche
-          Expanded(
-            child: ClipRect(
-              child: Transform.scale(
-                scale: 1.0,
-                alignment: Alignment.centerRight,
-                child: Image.file(File(imagePath), fit: BoxFit.cover),
-              ),
-            ),
-          ),
-          // Ligne centrale
-          Container(width: 1, color: Colors.white),
-          // Moitié droite
-          Expanded(
-            child: ClipRect(
-              child: Transform.scale(
-                scale: 1.0,
-                alignment: Alignment.centerLeft,
-                child: Image.file(File(imagePath), fit: BoxFit.cover),
-              ),
-            ),
-          ),
-        ],
-      );
-    } else {
-      // Affichage vertical (deux rangées)
-      return Column(
-        children: [
-          // Moitié supérieure
-          Expanded(
-            child: ClipRect(
-              child: Transform.scale(
-                scale: 1.0,
-                alignment: Alignment.bottomCenter,
-                child: Image.file(File(imagePath), fit: BoxFit.cover),
-              ),
-            ),
-          ),
-          // Ligne centrale
-          Container(height: 1, color: Colors.white),
-          // Moitié inférieure
-          Expanded(
-            child: ClipRect(
-              child: Transform.scale(
-                scale: 1.0,
-                alignment: Alignment.topCenter,
-                child: Image.file(File(imagePath), fit: BoxFit.cover),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-  }
-}
-
-// Créer un nouveau widget pour afficher l'image fusionnée
-class ImagePreviewScreen extends StatefulWidget {
-  final CapturedImage image;
-
-  const ImagePreviewScreen({super.key, required this.image});
-
-  @override
-  _ImagePreviewScreenState createState() => _ImagePreviewScreenState();
-}
-
-class _ImagePreviewScreenState extends State<ImagePreviewScreen> {
-  late String imagePath;
-
-  @override
-  void initState() {
-    super.initState();
-    imagePath = widget.image.path;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          Image.file(
-            File(imagePath),
-            fit: BoxFit.contain,
-            width: double.infinity,
-            height: double.infinity,
-          ),
         ],
       ),
     );
