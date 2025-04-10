@@ -182,7 +182,7 @@ List<EditableItem> items = [];
 
     _cameraController = CameraController(
       mainCamera,
-      ResolutionPreset.medium,
+      ResolutionPreset.max,
       imageFormatGroup: ImageFormatGroup.jpeg,
       enableAudio: _isVideoMode, // Enable audio only for video mode
     );
@@ -374,9 +374,6 @@ List<EditableItem> items = [];
   Future<void> _captureImage() async {
     if (_isCaptureInProgress) return;
     if (!_isCameraInitialized || _cameraController == null || !_cameraController!.value.isInitialized) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Camera is not ready yet')),
-      );
       return;
     }
 
@@ -924,7 +921,7 @@ Future<File?> _mergeImages() async {
             child: Column(
               children: [
                 // Bouton texte - visible uniquement quand capture terminée
-                if (_capturedImages.length >= _maxStoryPhotos)
+                if (_capturedImages.isNotEmpty)
                   Container(
                     margin: const EdgeInsets.only(bottom: 20),
                     child: GestureDetector(
@@ -1017,7 +1014,7 @@ Future<File?> _mergeImages() async {
                     ),
                   ),
                 // Bouton sticker - visible uniquement quand capture terminée
-                if (_capturedImages.length >= _maxStoryPhotos)
+                if (_capturedImages.isNotEmpty)
                   Container(
                     margin: const EdgeInsets.only(bottom: 20),
                     child: GestureDetector(
@@ -1066,118 +1063,6 @@ Future<File?> _mergeImages() async {
                   ),
                 // Bouton de sélection de la grille
                 // Bouton mode grille
-                !_isVideoMode && _capturedImages.isEmpty
-                    ? Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 2,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.65),
-                        borderRadius: BorderRadius.circular(25),
-                        border: Border.all(
-                          color: Color(0XFFD9D9D9).withOpacity(0.5),
-                          width: 4,
-                        ),
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-
-                        children: [
-                          GestureDetector(
-                            onTap: () {
-                              if (_selectedGridType == GridType.horizontal) {
-                                _cycleGridType(GridType.none);
-                                return;
-                              }
-                              _cycleGridType(GridType.horizontal);
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(7),
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color:
-                                    _selectedGridType == GridType.horizontal
-                                        ? Color(0XFFFFCD00)
-                                        : Colors.transparent,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: SvgPicture.asset(
-                                'assets/hori.svg',
-                                width: 20,
-                                height: 20,
-                                colorFilter: const ColorFilter.mode(
-                                  Colors.white,
-                                  BlendMode.srcIn,
-                                ),
-                              ),
-                            ),
-                          ),
-
-                          const SizedBox(height: 8),
-                          GestureDetector(
-                            onTap: () {
-                              if (_selectedGridType == GridType.vertical) {
-                                _cycleGridType(GridType.none);
-                                return;
-                              }
-                              _cycleGridType(GridType.vertical);
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(7),
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color:
-                                    _selectedGridType == GridType.vertical
-                                        ? Color(0XFFFFCD00)
-                                        : Colors.transparent,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: SvgPicture.asset(
-                                'assets/verti.svg',
-                                width: 20,
-                                height: 20,
-                                colorFilter: const ColorFilter.mode(
-                                  Colors.white,
-                                  BlendMode.srcIn,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          GestureDetector(
-                            onTap: () {
-                              if (_selectedGridType == GridType.bottomRight) {
-                                _cycleGridType(GridType.none);
-                                return;
-                              }
-                              _cycleGridType(GridType.bottomRight);
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(7),
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color:
-                                    _selectedGridType == GridType.bottomRight
-                                        ? Color(0XFFFFCD00)
-                                        : Colors.transparent,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: SvgPicture.asset(
-                                'assets/bottomright.svg',
-                                width: 20,
-                                height: 20,
-                                colorFilter: const ColorFilter.mode(
-                                  Colors.white,
-                                  BlendMode.srcIn,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    )
-                    : SizedBox.shrink(),
               ],
             ),
           ),
@@ -1355,7 +1240,7 @@ Future<File?> _mergeImages() async {
                           ),
                         )
                         : SizedBox.shrink(),
-                    _capturedImages.length < _maxStoryPhotos
+                    _capturedImages.isEmpty 
                         ? Text(
                           selectedIndex == 0
                               ? 'Story'
@@ -1372,7 +1257,7 @@ Future<File?> _mergeImages() async {
                     // Bouton de capture principal
 
                     //Button pour reverse la camera
-                    _capturedImages.length < _maxStoryPhotos
+                    _capturedImages.isEmpty 
                         ? GestureDetector(
                           onTap: _switchCamera,
                           child: SvgPicture.asset(
